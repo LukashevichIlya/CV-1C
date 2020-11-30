@@ -1,3 +1,5 @@
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
 import torch
 import numpy as np
 import time
@@ -20,36 +22,40 @@ def get_train_val_loader(data_dir,
                          random_seed=42,
                          shuffle=True,
                          pin_memory=True):
-    error_msg = "[!] valid_size should be in the range [0, 1]."
+    error_msg = "[!] val_size should be in the range [0, 1]."
     assert ((val_size >= 0) and (val_size <= 1)), error_msg
 
-    normalize = transforms.Normalize(
-        mean=[0.4914, 0.4822, 0.4465],
-        std=[0.2023, 0.1994, 0.2010],
+    normalize = A.Normalize(
+        mean=(0.4914, 0.4822, 0.4465),
+        std=(0.2023, 0.1994, 0.2010),
     )
 
     # define transforms
     if val_transform is None:
-        val_transform = transforms.Compose([
-            transforms.ToTensor(),
+        val_transform = A.Compose([
             normalize,
+            ToTensorV2(),
         ])
 
     if train_transform is None:
-        train_transform = transforms.Compose([
-            transforms.ToTensor(),
+        train_transform = A.Compose([
             normalize,
+            ToTensorV2(),
         ])
 
     # load the dataset
     train_dataset = datasets.CIFAR10(
-        root=data_dir, train=True,
-        download=True, transform=train_transform,
+        root=data_dir,
+        train=True,
+        download=True,
+        transform=lambda x: train_transform(image=np.array(x))['image'],
     )
 
     val_dataset = datasets.CIFAR10(
-        root=data_dir, train=True,
-        download=True, transform=val_transform,
+        root=data_dir,
+        train=True,
+        download=True,
+        transform=lambda x: val_transform(image=np.array(x))['image'],
     )
 
     num_train = len(train_dataset)
@@ -107,7 +113,8 @@ def get_test_loader(data_dir,
 
 
 def train(model, device, iterator, optimizer, criterion, clip, train_loss_history=None,
-          valid_loss_history=None, train_acc_history=None, valid_acc_history=None, plot_local=True, writer=None):
+          valid_loss_history=None, train_acc_history=None, valid_acc_history=None, plot_local=True,
+          writer=None, scaler=None):
     global PLOT_STEP
     model.train()
     epoch_loss = 0
@@ -119,10 +126,20 @@ def train(model, device, iterator, optimizer, criterion, clip, train_loss_histor
 
         optimizer.zero_grad()
 
-        output = model(batch)
-        loss = criterion(output, labels)
+        if scaler is not None:
+            with torch.cuda.amp.autocast():
+                output = model(batch)
+                loss = criterion(output, labels)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            output = model(batch)
+            loss = criterion(output, labels)
+            loss.backward()
+            optimizer.step()
+
         epoch_loss += loss.item()
-        loss.backward()
 
         # Calculate train accuracy
         ret, predictions = torch.max(output.data, 1)
@@ -135,9 +152,7 @@ def train(model, device, iterator, optimizer, criterion, clip, train_loss_histor
         train_acc += acc.item()
 
         # Let's clip the gradient
-        torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
-
-        optimizer.step()
+        # torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
 
         history.append(loss.cpu().data.numpy())
         if (i + 1) % 10 == 0:
@@ -167,7 +182,7 @@ def train(model, device, iterator, optimizer, criterion, clip, train_loss_histor
     return epoch_loss / len(iterator), train_acc / len(iterator)
 
 
-def evaluate(model, device, iterator, criterion):
+def evaluate(model, device, iterator, criterion, enable_mixed_precision=False):
     model.eval()
     epoch_loss = 0
     valid_acc = 0
@@ -176,9 +191,14 @@ def evaluate(model, device, iterator, criterion):
         for i, (batch, labels) in enumerate(iterator):
             batch, labels = batch.to(device), labels.to(device)
 
-            output = model(batch)
+            if enable_mixed_precision:
+                with torch.cuda.amp.autocast():
+                    output = model(batch)
+                    loss = criterion(output, labels)
+            else:
+                output = model(batch)
+                loss = criterion(output, labels)
 
-            loss = criterion(output, labels)
             epoch_loss += loss.item()
 
             # Calculate validation accuracy
@@ -202,7 +222,8 @@ def epoch_time(start_time, end_time):
 
 
 def train_model(model, device, train_iterator, valid_iterator, optimizer, criterion,
-                lr_scheduler, n_epochs, clip, writer=None, model_name="model.pth"):
+                lr_scheduler, n_epochs, clip, writer=None, enable_mixed_precision=False,
+                model_name="model.pth"):
     train_loss_history = []
     valid_loss_history = []
     train_acc_history = []
@@ -210,21 +231,28 @@ def train_model(model, device, train_iterator, valid_iterator, optimizer, criter
 
     best_valid_loss = float('inf')
 
+    if enable_mixed_precision:
+        scaler = torch.cuda.amp.GradScaler()
+    else:
+        scaler = None
+
     for epoch in range(n_epochs):
 
         start_time = time.time()
 
         train_loss, train_acc = train(model, device, train_iterator, optimizer, criterion, clip,
                                       train_loss_history, valid_loss_history, train_acc_history, valid_acc_history,
-                                      plot_local=True, writer=writer)
-        valid_loss, valid_acc = evaluate(model, device, valid_iterator, criterion)
+                                      plot_local=True, writer=writer, scaler=scaler)
+
+        valid_loss, valid_acc = evaluate(model, device, valid_iterator, criterion,
+                                         enable_mixed_precision=enable_mixed_precision)
 
         if writer:
             writer.add_scalar('Mean train loss per epoch', train_loss, global_step=epoch)
             writer.add_scalar('Mean val loss per epoch', valid_loss, global_step=epoch)
         # writer.flush()
 
-        lr_scheduler.step(valid_loss)
+        lr_scheduler.step()
 
         end_time = time.time()
 
