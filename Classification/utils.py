@@ -1,6 +1,7 @@
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 import torch
+import gc
 import numpy as np
 import time
 from IPython.display import clear_output
@@ -11,6 +12,25 @@ from torchvision import transforms
 from torch.utils.data.sampler import SubsetRandomSampler
 
 PLOT_STEP = 0
+start_time = None
+
+
+def start_timer():
+    global start_time
+    gc.collect()
+    torch.cuda.empty_cache()
+    torch.cuda.reset_max_memory_allocated()
+    torch.cuda.synchronize()
+    start_time = time.time()
+
+
+def end_timer():
+    torch.cuda.synchronize()
+    end_time = time.time()
+    return end_time - start_time
+    # print("\n" + local_msg)
+    # print("Total execution time = {:.3f} sec".format(end_time - start_time))
+    # print("Max memory used by tensors = {} bytes".format(torch.cuda.max_memory_allocated()))
 
 
 def get_train_val_loader(data_dir,
@@ -89,19 +109,21 @@ def get_test_loader(data_dir,
                     num_workers=4,
                     shuffle=True,
                     pin_memory=True):
-    # define transform
+    # define transforms
     if test_transform is None:
-        transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(
-                mean=[0.485, 0.456, 0.406],
-                std=[0.229, 0.224, 0.225],
+        test_transform = A.Compose([
+            A.Normalize(
+                mean=(0.4914, 0.4822, 0.4465),
+                std=(0.2023, 0.1994, 0.2010),
             ),
+            ToTensorV2(),
         ])
 
     dataset = datasets.CIFAR10(
-        root=data_dir, train=False,
-        download=True, transform=test_transform,
+        root=data_dir,
+        train=False,
+        download=True,
+        transform=lambda x: test_transform(image=np.array(x))['image'],
     )
 
     data_loader = torch.utils.data.DataLoader(
@@ -223,11 +245,13 @@ def epoch_time(start_time, end_time):
 
 def train_model(model, device, train_iterator, valid_iterator, optimizer, criterion,
                 lr_scheduler, n_epochs, clip, writer=None, enable_mixed_precision=False,
-                model_name="model.pth"):
+                model_name="model.pth", return_time=False):
     train_loss_history = []
     valid_loss_history = []
     train_acc_history = []
     valid_acc_history = []
+    train_times = []
+    val_times = []
 
     best_valid_loss = float('inf')
 
@@ -240,12 +264,16 @@ def train_model(model, device, train_iterator, valid_iterator, optimizer, criter
 
         start_time = time.time()
 
+        start_timer()
         train_loss, train_acc = train(model, device, train_iterator, optimizer, criterion, clip,
                                       train_loss_history, valid_loss_history, train_acc_history, valid_acc_history,
                                       plot_local=True, writer=writer, scaler=scaler)
+        train_time = end_timer()
 
+        start_timer()
         valid_loss, valid_acc = evaluate(model, device, valid_iterator, criterion,
                                          enable_mixed_precision=enable_mixed_precision)
+        val_time = end_timer()
 
         if writer:
             writer.add_scalar('Mean train loss per epoch', train_loss, global_step=epoch)
@@ -266,7 +294,12 @@ def train_model(model, device, train_iterator, valid_iterator, optimizer, criter
         valid_loss_history.append(valid_loss)
         train_acc_history.append(train_acc)
         valid_acc_history.append(valid_acc)
+        train_times.append(train_time)
+        val_times.append(val_time)
 
         print(f'Epoch: {epoch + 1:02} | Time: {epoch_mins}m {epoch_secs}s')
         print(f'\tTrain Loss: {train_loss:.3f}')
         print(f'\t Val. Loss: {valid_loss:.3f}')
+
+    if return_time:
+        return train_times, val_times
