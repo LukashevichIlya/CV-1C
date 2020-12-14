@@ -34,8 +34,17 @@ def compute_saliency_maps(X, y, model):
     ##############################################################################
     # *****START OF YOUR CODE (DO NOT DELETE/MODIFY THIS LINE)*****
 
-    pass
+    # get the scores of the model
+    scores = model(X)                                               # (N, Classes)
 
+    # get predictions by indices
+    scores = scores.gather(dim=1, index=y.view(-1, 1)).squeeze()    # (N, )
+
+    # compute backward
+    scores.backward(torch.ones(scores.shape[0], dtype=torch.float32))
+
+    # compute saliency
+    saliency, _ = torch.max(X.grad.data.abs(), dim=1)
     # *****END OF YOUR CODE (DO NOT DELETE/MODIFY THIS LINE)*****
     ##############################################################################
     #                             END OF YOUR CODE                               #
@@ -76,7 +85,22 @@ def make_fooling_image(X, target_y, model):
     ##############################################################################
     # *****START OF YOUR CODE (DO NOT DELETE/MODIFY THIS LINE)*****
 
-    pass
+    for i in range(100):
+        # get the scores and model prediction
+        scores = model(X_fooling) # (1, Classes)
+        prediction = torch.argmax(scores, dim=1)
+
+        if prediction != target_y:
+            scores[:, target_y].backward()
+
+            # compute an update
+            dX = learning_rate * X_fooling.grad.data / torch.norm(X_fooling.grad.data)
+            X_fooling.data += dX.data
+
+            # zero gradients for the next iteration
+            X_fooling.grad.data.zero_()
+        else:
+            break
 
     # *****END OF YOUR CODE (DO NOT DELETE/MODIFY THIS LINE)*****
     ##############################################################################
@@ -94,7 +118,19 @@ def class_visualization_update_step(img, model, target_y, l2_reg, learning_rate)
     ########################################################################
     # *****START OF YOUR CODE (DO NOT DELETE/MODIFY THIS LINE)*****
 
-    pass
+    # compute scores of the model
+    scores = model(img)
+
+    # compute gradient of the score for the class target_y with respect to
+    # the pixels of the image with L2 regularization
+    score = scores[:, target_y] - (l2_reg * torch.square(torch.norm(img)))
+    score.backward()
+
+    # perform an image update using computed gradient
+    img.data += learning_rate * img.grad.data
+
+    # zero gradients for the next iteration
+    img.grad.data.zero_()
 
     # *****END OF YOUR CODE (DO NOT DELETE/MODIFY THIS LINE)*****
     ########################################################################
