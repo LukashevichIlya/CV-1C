@@ -151,7 +151,44 @@ class CaptioningRNN(object):
         ############################################################################
         # *****START OF YOUR CODE (DO NOT DELETE/MODIFY THIS LINE)*****
 
-        pass
+        # forward pass
+
+        # (1): initial hidden state from image features
+        h0, cache_affine = affine_forward(features, W_proj, b_proj)
+
+        # (2): word embedding layer transforming captions_in to vectors
+        emb_captions_in, cache_emb_in = word_embedding_forward(captions_in, W_embed)
+
+        # (3): select forward pass type depending of self.cell_type and make forward pass 
+        if self.cell_type == 'rnn':
+            forward_pass = rnn_forward
+        else:
+            forward_pass = lstm_forward
+        h, cache_rnn = forward_pass(emb_captions_in, h0, Wx, Wh, b)
+
+        # (4): compute scores over the vocab using temporal affine transformation
+        scores, cache_temporal = temporal_affine_forward(h, W_vocab, b_vocab)
+
+        # (5): compute softmax using captions_out and mask
+        loss, dout = temporal_softmax_loss(scores, captions_out, mask)
+
+        # backward pass
+
+        # (4)
+        dout, grads["W_vocab"], grads["b_vocab"] = temporal_affine_backward(dout, cache_temporal)
+
+        # (3)
+        if self.cell_type == 'rnn':
+            backward_pass = rnn_backward
+        else:
+            backward_pass = lstm_backward
+        dout, dh0, grads["Wx"], grads["Wh"], grads["b"] = backward_pass(dout, cache_rnn)
+
+        # (2)
+        grads["W_embed"] = word_embedding_backward(dout, cache_emb_in)
+
+        # (1)
+        _, grads["W_proj"], grads["b_proj"] = affine_backward(dh0, cache_affine)  
 
         # *****END OF YOUR CODE (DO NOT DELETE/MODIFY THIS LINE)*****
         ############################################################################
@@ -219,7 +256,25 @@ class CaptioningRNN(object):
         ###########################################################################
         # *****START OF YOUR CODE (DO NOT DELETE/MODIFY THIS LINE)*****
 
-        pass
+        # initialize hidden state by applying learned affine transform
+        h = features @ W_proj + b_proj
+
+        # initialize first input embeddings
+        src = W_embed[self._start] * np.ones((N, W_embed.shape[1]))
+
+        # initialize cell state for lstm
+        c = np.zeros(h.shape)
+
+        for i in range(max_length):
+            if self.cell_type == "rnn":
+                next_h, _ = rnn_step_forward(src, h, Wx, Wh, b)
+            else:
+                next_h, next_c, _ = lstm_step_forward(src, h, c, Wx, Wh, b)
+                c = next_c
+            current_output = next_h @ W_vocab + b_vocab
+            captions[:, i] = current_output.argmax(axis=1)
+            h = next_h
+            src = W_embed[captions[:, i]]
 
         # *****END OF YOUR CODE (DO NOT DELETE/MODIFY THIS LINE)*****
         ############################################################################
